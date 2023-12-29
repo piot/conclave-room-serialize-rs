@@ -2,18 +2,23 @@
  *  Copyright (c) Peter Bjorklund. All rights reserved. https://github.com/piot/conclave-room-serialize-rs
  *  Licensed under the MIT License. See LICENSE in the project root for license information.
  *--------------------------------------------------------------------------------------------------------*/
-use std::io::{Cursor, Read};
+//! The Conclave Room Protocol Serialization
+
+use std::io::Cursor;
 
 use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
 use conclave_room;
 use conclave_room::{Knowledge, Term};
 
+use crate::ClientReceiveCommand::RoomInfoType;
 use crate::ServerReceiveCommand::PingCommandType;
 
+/// Sent from Client to Server
 #[derive(Debug, PartialEq)]
 pub struct PingCommand {
     pub term: Term,
     pub knowledge: Knowledge,
+    pub has_connection_to_leader: bool,
 }
 
 impl PingCommand {
@@ -22,6 +27,13 @@ impl PingCommand {
 
         writer.write_u16::<BigEndian>(self.term).unwrap();
         writer.write_u64::<BigEndian>(self.knowledge).unwrap();
+        writer
+            .write_u8(if self.has_connection_to_leader {
+                0x01
+            } else {
+                0x00
+            })
+            .unwrap();
 
         writer
     }
@@ -30,28 +42,85 @@ impl PingCommand {
         Self {
             term: reader.read_u16::<BigEndian>().unwrap(),
             knowledge: reader.read_u64::<BigEndian>().unwrap(),
+            has_connection_to_leader: reader.read_u8().unwrap() != 0,
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub struct ClientInfo {
+    pub custom_user_id: u64,
+    pub connection_index: u8,
+}
+
+/// Sent from Server to Client
+#[derive(Debug, PartialEq)]
+pub struct RoomInfoCommand {
+    pub term: Term,
+    pub leader_index: u8,
+    pub client_infos: Vec<ClientInfo>,
+}
+
+impl RoomInfoCommand {
+    pub fn to_octets(&self) -> Vec<u8> {
+        let mut writer = vec![];
+
+        writer.write_u16::<BigEndian>(self.term).unwrap();
+        writer.write_u8(self.client_infos.len() as u8).unwrap();
+        for client_info in self.client_infos.iter() {
+            writer.write_u8(client_info.connection_index).unwrap();
+            writer
+                .write_u64::<BigEndian>(client_info.custom_user_id)
+                .unwrap();
+        }
+        writer.write_u8(self.leader_index).unwrap();
+
+        writer
+    }
+
+    pub fn from_cursor(reader: &mut Cursor<&[u8]>) -> Self {
+        let term = reader.read_u16::<BigEndian>().unwrap();
+        let length = reader.read_u8().unwrap() as usize;
+        let slice = &mut vec![ClientInfo {
+            custom_user_id: 0,
+            connection_index: 0,
+        }][..length as usize];
+        for x in 0..length {
+            slice[x] = ClientInfo {
+                connection_index: reader.read_u8().unwrap(),
+                custom_user_id: reader.read_u64::<BigEndian>().unwrap(),
+            }
+        }
+        Self {
+            term,
+            leader_index: reader.read_u8().unwrap(),
+            client_infos: slice.to_vec(),
         }
     }
 }
 
 #[derive(Debug)]
-enum ServerReceiveCommand {
+pub enum ServerReceiveCommand {
     PingCommandType(PingCommand),
 }
 
 impl ServerReceiveCommand {
     pub fn to_octets(&self) -> Result<Vec<u8>, String> {
         let command_type_id = match self {
-            PingCommandType(ping_command) => PING_COMMAND_TYPE_ID,
+            PingCommandType(_) => PING_COMMAND_TYPE_ID,
             _ => return Err(format!("unsupported command {:?}", self)),
         };
 
         let mut writer = vec![];
 
-        writer.write_u8(command_type_id).expect("could not write command type id");
+        writer
+            .write_u8(command_type_id)
+            .expect("could not write command type id");
 
         match self {
-            PingCommandType(ping_command) => writer.extend_from_slice(ping_command.to_octets().as_slice()),
+            PingCommandType(ping_command) => {
+                writer.extend_from_slice(ping_command.to_octets().as_slice())
+            }
             _ => return Err(format!("unknown command enum {:?}", self)),
         }
 
@@ -59,30 +128,73 @@ impl ServerReceiveCommand {
     }
 
     pub fn from_octets(input: &[u8]) -> Result<ServerReceiveCommand, String> {
-        let mut rdr = Cursor::new(input);
-        let command_type_id = rdr.read_u8().unwrap();
+        let reader = Cursor::new(input);
+        ServerReceiveCommand::from_cursor(reader)
+    }
+
+    pub fn from_cursor(mut reader: Cursor<&[u8]>) -> Result<ServerReceiveCommand, String> {
+        let command_type_id = reader.read_u8().unwrap();
         match command_type_id {
-            PING_COMMAND_TYPE_ID => Ok(PingCommandType(PingCommand::from_cursor(&mut rdr))),
+            PING_COMMAND_TYPE_ID => Ok(PingCommandType(PingCommand::from_cursor(&mut reader))),
             _ => Err(format!("unknown command 0x{:x}", command_type_id)),
         }
     }
 }
 
-const PING_COMMAND_TYPE_ID: u8 = 0x01;
+pub const PING_COMMAND_TYPE_ID: u8 = 0x01;
+pub const ROOM_INFO_COMMAND_TYPE_ID: u8 = 0x02;
 
+#[derive(Debug)]
+enum ClientReceiveCommand {
+    RoomInfoType(RoomInfoCommand),
+}
+
+impl ClientReceiveCommand {
+    pub fn to_octets(&self) -> Result<Vec<u8>, String> {
+        let command_type_id = match self {
+            RoomInfoType(room_info_command) => ROOM_INFO_COMMAND_TYPE_ID,
+            _ => return Err(format!("unsupported command {:?}", self)),
+        };
+
+        let mut writer = vec![];
+
+        writer
+            .write_u8(command_type_id)
+            .expect("could not write command type id");
+
+        match self {
+            RoomInfoType(room_info_command) => {
+                writer.extend_from_slice(room_info_command.to_octets().as_slice())
+            }
+            _ => return Err(format!("unknown command enum {:?}", self)),
+        }
+
+        Ok(writer)
+    }
+
+    pub fn from_octets(input: &[u8]) -> Result<ClientReceiveCommand, String> {
+        let mut rdr = Cursor::new(input);
+        let command_type_id = rdr.read_u8().unwrap();
+        match command_type_id {
+            ROOM_INFO_COMMAND_TYPE_ID => Ok(RoomInfoType(RoomInfoCommand::from_cursor(&mut rdr))),
+            _ => Err(format!("unknown command 0x{:x}", command_type_id)),
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {
     use std::io::Cursor;
 
-    use crate::{PING_COMMAND_TYPE_ID, PingCommand, ServerReceiveCommand};
     use crate::ServerReceiveCommand::PingCommandType;
+    use crate::{PingCommand, ServerReceiveCommand, PING_COMMAND_TYPE_ID};
 
     #[test]
     fn check_serializer() {
         let ping_command = PingCommand {
             term: 32,
             knowledge: 444441,
+            has_connection_to_leader: false,
         };
 
         let encoded = ping_command.to_octets();
@@ -98,9 +210,19 @@ mod tests {
     fn check_receive_message() {
         const EXPECTED_KNOWLEDGE_VALUE: u64 = 17718865395771014920;
 
-        let octets = [PING_COMMAND_TYPE_ID,
-            0x00, 0x20, // Term
-            0xF5, 0xE6, 0x0E, 0x32, 0xE9, 0xE4, 0x7F, 0x08 // Knowledge
+        let octets = [
+            PING_COMMAND_TYPE_ID,
+            0x00,
+            0x20, // Term
+            0xF5,
+            0xE6,
+            0x0E,
+            0x32,
+            0xE9,
+            0xE4,
+            0x7F,
+            0x08, // Knowledge
+            0x01, // Has Connection
         ];
 
         let message = &ServerReceiveCommand::from_octets(&octets).unwrap();
@@ -108,12 +230,13 @@ mod tests {
         match message {
             PingCommandType(ping_command) => {
                 println!("received {:?}", &ping_command);
-                assert_eq!(0x20, ping_command.term);
-                assert_eq!(EXPECTED_KNOWLEDGE_VALUE, ping_command.knowledge);
+                assert_eq!(ping_command.term, 0x20);
+                assert_eq!(ping_command.knowledge, EXPECTED_KNOWLEDGE_VALUE);
+                assert_eq!(ping_command.has_connection_to_leader, true);
                 let octets_after = message.to_octets().unwrap();
                 assert_eq!(octets, octets_after.as_slice());
             }
-            _ => assert!(false, "should be ping command")
+            _ => assert!(false, "should be ping command"),
         }
     }
 }
