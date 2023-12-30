@@ -108,7 +108,7 @@ impl ServerReceiveCommand {
     pub fn to_octets(&self) -> Result<Vec<u8>, String> {
         let command_type_id = match self {
             PingCommandType(_) => PING_COMMAND_TYPE_ID,
-            _ => return Err(format!("unsupported command {:?}", self)),
+            // _ => return Err(format!("unsupported command {:?}", self)),
         };
 
         let mut writer = vec![];
@@ -121,7 +121,7 @@ impl ServerReceiveCommand {
             PingCommandType(ping_command) => {
                 writer.extend_from_slice(ping_command.to_octets().as_slice())
             }
-            _ => return Err(format!("unknown command enum {:?}", self)),
+            // _ => return Err(format!("unknown command enum {:?}", self)),
         }
 
         Ok(writer)
@@ -145,15 +145,15 @@ pub const PING_COMMAND_TYPE_ID: u8 = 0x01;
 pub const ROOM_INFO_COMMAND_TYPE_ID: u8 = 0x02;
 
 #[derive(Debug)]
-enum ClientReceiveCommand {
+pub enum ClientReceiveCommand {
     RoomInfoType(RoomInfoCommand),
 }
 
 impl ClientReceiveCommand {
     pub fn to_octets(&self) -> Result<Vec<u8>, String> {
         let command_type_id = match self {
-            RoomInfoType(room_info_command) => ROOM_INFO_COMMAND_TYPE_ID,
-            _ => return Err(format!("unsupported command {:?}", self)),
+            RoomInfoType(_) => ROOM_INFO_COMMAND_TYPE_ID,
+            // _ => return Err(format!("unsupported command {:?}", self)),
         };
 
         let mut writer = vec![];
@@ -166,7 +166,7 @@ impl ClientReceiveCommand {
             RoomInfoType(room_info_command) => {
                 writer.extend_from_slice(room_info_command.to_octets().as_slice())
             }
-            _ => return Err(format!("unknown command enum {:?}", self)),
+            // _ => return Err(format!("unknown command enum {:?}", self)),
         }
 
         Ok(writer)
@@ -187,7 +187,8 @@ mod tests {
     use std::io::Cursor;
 
     use crate::ServerReceiveCommand::PingCommandType;
-    use crate::{PingCommand, ServerReceiveCommand, PING_COMMAND_TYPE_ID};
+    use crate::ClientReceiveCommand::RoomInfoType;
+    use crate::{PingCommand, ServerReceiveCommand, PING_COMMAND_TYPE_ID, ClientReceiveCommand,  ROOM_INFO_COMMAND_TYPE_ID};
 
     #[test]
     fn check_serializer() {
@@ -207,7 +208,7 @@ mod tests {
     }
 
     #[test]
-    fn check_receive_message() {
+    fn check_server_receive_message() {
         const EXPECTED_KNOWLEDGE_VALUE: u64 = 17718865395771014920;
 
         let octets = [
@@ -236,7 +237,35 @@ mod tests {
                 let octets_after = message.to_octets().unwrap();
                 assert_eq!(octets, octets_after.as_slice());
             }
-            _ => assert!(false, "should be ping command"),
+            // _ => assert!(false, "should be ping command"),
+        }
+    }
+
+
+    #[test]
+    fn check_client_receive_message() {
+        const EXPECTED_LEADER_INDEX: u8 = 1;
+
+        let octets = [
+            ROOM_INFO_COMMAND_TYPE_ID,
+            0x00, // Term
+            0x4A, // Term (lower)
+            0x00, // Number of client infos that follows
+            EXPECTED_LEADER_INDEX, // Leader index
+        ];
+
+
+        let message = &ClientReceiveCommand::from_octets(&octets).unwrap();
+
+        match message {
+            RoomInfoType(room_info) => {
+                println!("received {:?}", &room_info);
+                assert_eq!(room_info.term, 0x4A);
+                assert_eq!(room_info.leader_index, EXPECTED_LEADER_INDEX);
+                let octets_after = message.to_octets().unwrap();
+                assert_eq!(octets, octets_after.as_slice());
+            }
+            // _ => assert!(false, "should be room info command"),
         }
     }
 }
