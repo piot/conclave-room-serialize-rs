@@ -7,7 +7,6 @@
 use std::io::Cursor;
 
 use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
-use conclave_room;
 use conclave_room::{Knowledge, Term};
 
 use crate::ClientReceiveCommand::RoomInfoType;
@@ -84,9 +83,9 @@ impl RoomInfoCommand {
         let slice = &mut vec![ClientInfo {
             custom_user_id: 0,
             connection_index: 0,
-        }][..length as usize];
-        for x in 0..length {
-            slice[x] = ClientInfo {
+        }][..length];
+        for client_info in slice.iter_mut().take(length) {
+            *client_info = ClientInfo {
                 connection_index: reader.read_u8().unwrap(),
                 custom_user_id: reader.read_u64::<BigEndian>().unwrap(),
             }
