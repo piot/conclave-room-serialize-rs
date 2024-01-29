@@ -1,6 +1,6 @@
 [package]
 name = "conclave-room-serialize"
-version = "0.0.2-pre02"
+version = "0.0.2-pre03"
 edition = "2021"
 license = "MIT"
 description = "serialization for the conclave room protocol"
@@ -10,4 +10,4 @@ repository = "https://github.com/piot/conclave-room-serialize-rs"
 
 [dependencies]
 conclave-room = "0.0.2-pre02"
-byteorder = "1.5.0"
+flood-rs = "0.0.3"

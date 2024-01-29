@@ -4,10 +4,10 @@
  *--------------------------------------------------------------------------------------------------------*/
 //! The Conclave Room Protocol Serialization
 
-use std::io::Cursor;
+use std::io::{Error, ErrorKind, Result};
 
-use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
 use conclave_room::{Knowledge, Term};
+use flood_rs::{ReadOctetStream, WriteOctetStream};
 
 use crate::ClientReceiveCommand::RoomInfoType;
 use crate::ServerReceiveCommand::PingCommandType;
@@ -21,28 +21,24 @@ pub struct PingCommand {
 }
 
 impl PingCommand {
-    pub fn to_octets(&self) -> Vec<u8> {
-        let mut writer = vec![];
+    pub fn to_octets<T: WriteOctetStream>(&self, stream: &mut T) -> Result<()> {
+        stream.write_u16(self.term)?;
+        stream.write_u64(self.knowledge)?;
+        stream.write_u8(if self.has_connection_to_leader {
+            0x01
+        } else {
+            0x00
+        })?;
 
-        writer.write_u16::<BigEndian>(self.term).unwrap();
-        writer.write_u64::<BigEndian>(self.knowledge).unwrap();
-        writer
-            .write_u8(if self.has_connection_to_leader {
-                0x01
-            } else {
-                0x00
-            })
-            .unwrap();
-
-        writer
+        Ok(())
     }
 
-    pub fn from_cursor(reader: &mut Cursor<&[u8]>) -> Self {
-        Self {
-            term: reader.read_u16::<BigEndian>().unwrap(),
-            knowledge: reader.read_u64::<BigEndian>().unwrap(),
-            has_connection_to_leader: reader.read_u8().unwrap() != 0,
-        }
+    pub fn from_cursor<T: ReadOctetStream>(stream: &mut T) -> Result<Self> {
+        Ok(Self {
+            term: stream.read_u16()?,
+            knowledge: stream.read_u64()?,
+            has_connection_to_leader: stream.read_u8()? != 0,
+        })
     }
 }
 
@@ -61,40 +57,36 @@ pub struct RoomInfoCommand {
 }
 
 impl RoomInfoCommand {
-    pub fn to_octets(&self) -> Vec<u8> {
-        let mut writer = vec![];
-
-        writer.write_u16::<BigEndian>(self.term).unwrap();
-        writer.write_u8(self.client_infos.len() as u8).unwrap();
+    pub fn to_octets(&self, stream: &mut impl WriteOctetStream) -> Result<()> {
+        stream.write_u16(self.term)?;
+        stream.write_u8(self.client_infos.len() as u8)?;
         for client_info in self.client_infos.iter() {
-            writer.write_u8(client_info.connection_index).unwrap();
-            writer
-                .write_u64::<BigEndian>(client_info.custom_user_id)
-                .unwrap();
+            stream.write_u8(client_info.connection_index)?;
+            stream.write_u64(client_info.custom_user_id)?;
         }
-        writer.write_u8(self.leader_index).unwrap();
+        stream.write_u8(self.leader_index)?;
 
-        writer
+        Ok(())
     }
 
-    pub fn from_cursor(reader: &mut Cursor<&[u8]>) -> Self {
-        let term = reader.read_u16::<BigEndian>().unwrap();
-        let length = reader.read_u8().unwrap() as usize;
+    pub fn from_cursor(stream: &mut impl ReadOctetStream) -> Result<Self> {
+        let term = stream.read_u16()?;
+        let length = stream.read_u8()? as usize;
         let slice = &mut vec![ClientInfo {
             custom_user_id: 0,
             connection_index: 0,
         }][..length];
         for client_info in slice.iter_mut().take(length) {
             *client_info = ClientInfo {
-                connection_index: reader.read_u8().unwrap(),
-                custom_user_id: reader.read_u64::<BigEndian>().unwrap(),
+                connection_index: stream.read_u8()?,
+                custom_user_id: stream.read_u64()?,
             }
         }
-        Self {
+        Ok(Self {
             term,
-            leader_index: reader.read_u8().unwrap(),
+            leader_index: stream.read_u8()?,
             client_infos: slice.to_vec(),
-        }
+        })
     }
 }
 
@@ -104,38 +96,31 @@ pub enum ServerReceiveCommand {
 }
 
 impl ServerReceiveCommand {
-    pub fn to_octets(&self) -> Result<Vec<u8>, String> {
+    pub fn to_octets(&self, stream: &mut impl WriteOctetStream) -> Result<()> {
         let command_type_id = match self {
             PingCommandType(_) => PING_COMMAND_TYPE_ID,
             // _ => return Err(format!("unsupported command {:?}", self)),
         };
 
-        let mut writer = vec![];
-
-        writer
-            .write_u8(command_type_id)
-            .expect("could not write command type id");
+        stream.write_u8(command_type_id)?;
 
         match self {
             PingCommandType(ping_command) => {
-                writer.extend_from_slice(ping_command.to_octets().as_slice())
-            }
-            // _ => return Err(format!("unknown command enum {:?}", self)),
+                ping_command.to_octets(stream)?;
+            } // _ => return Err(format!("unknown command enum {:?}", self)),
         }
 
-        Ok(writer)
+        Ok(())
     }
 
-    pub fn from_octets(input: &[u8]) -> Result<ServerReceiveCommand, String> {
-        let reader = Cursor::new(input);
-        ServerReceiveCommand::from_cursor(reader)
-    }
-
-    pub fn from_cursor(mut reader: Cursor<&[u8]>) -> Result<ServerReceiveCommand, String> {
-        let command_type_id = reader.read_u8().unwrap();
+    pub fn from_cursor<T: ReadOctetStream>(stream: &mut T) -> Result<ServerReceiveCommand> {
+        let command_type_id = stream.read_u8()?;
         match command_type_id {
-            PING_COMMAND_TYPE_ID => Ok(PingCommandType(PingCommand::from_cursor(&mut reader))),
-            _ => Err(format!("unknown command 0x{:x}", command_type_id)),
+            PING_COMMAND_TYPE_ID => Ok(PingCommandType(PingCommand::from_cursor(stream)?)),
+            _ => Err(Error::new(
+                ErrorKind::Other,
+                format!("unknown command 0x{:x}", command_type_id),
+            )),
         }
     }
 }
@@ -149,45 +134,43 @@ pub enum ClientReceiveCommand {
 }
 
 impl ClientReceiveCommand {
-    pub fn to_octets(&self) -> Result<Vec<u8>, String> {
+    pub fn to_octets<T: WriteOctetStream>(&self, stream: &mut T) -> Result<()> {
         let command_type_id = match self {
             RoomInfoType(_) => ROOM_INFO_COMMAND_TYPE_ID,
             // _ => return Err(format!("unsupported command {:?}", self)),
         };
 
-        let mut writer = vec![];
-
-        writer
-            .write_u8(command_type_id)
-            .expect("could not write command type id");
+        stream.write_u8(command_type_id)?;
 
         match self {
-            RoomInfoType(room_info_command) => {
-                writer.extend_from_slice(room_info_command.to_octets().as_slice())
-            }
-            // _ => return Err(format!("unknown command enum {:?}", self)),
+            RoomInfoType(room_info_command) => room_info_command.to_octets(stream)?, // _ => return Err(format!("unknown command enum {:?}", self)),
         }
 
-        Ok(writer)
+        Ok(())
     }
 
-    pub fn from_octets(input: &[u8]) -> Result<ClientReceiveCommand, String> {
-        let mut rdr = Cursor::new(input);
-        let command_type_id = rdr.read_u8().unwrap();
+    pub fn from_octets<T: ReadOctetStream>(stream: &mut T) -> Result<ClientReceiveCommand> {
+        let command_type_id = stream.read_u8()?;
         match command_type_id {
-            ROOM_INFO_COMMAND_TYPE_ID => Ok(RoomInfoType(RoomInfoCommand::from_cursor(&mut rdr))),
-            _ => Err(format!("unknown command 0x{:x}", command_type_id)),
+            ROOM_INFO_COMMAND_TYPE_ID => Ok(RoomInfoType(RoomInfoCommand::from_cursor(stream)?)),
+            _ => Err(Error::new(
+                ErrorKind::Other,
+                format!("unknown command 0x{:x}", command_type_id),
+            )),
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::io::Cursor;
+    use flood_rs::{InOctetStream, OutOctetStream};
 
-    use crate::ServerReceiveCommand::PingCommandType;
     use crate::ClientReceiveCommand::RoomInfoType;
-    use crate::{PingCommand, ServerReceiveCommand, PING_COMMAND_TYPE_ID, ClientReceiveCommand,  ROOM_INFO_COMMAND_TYPE_ID};
+    use crate::ServerReceiveCommand::PingCommandType;
+    use crate::{
+        ClientReceiveCommand, PingCommand, ServerReceiveCommand, PING_COMMAND_TYPE_ID,
+        ROOM_INFO_COMMAND_TYPE_ID,
+    };
 
     #[test]
     fn check_serializer() {
@@ -197,9 +180,12 @@ mod tests {
             has_connection_to_leader: false,
         };
 
-        let encoded = ping_command.to_octets();
-        let mut receive_cursor = Cursor::new(encoded.as_slice());
-        let deserialized_ping_command = PingCommand::from_cursor(&mut receive_cursor);
+        let mut out_stream = OutOctetStream::new();
+        ping_command.to_octets(&mut out_stream).unwrap();
+
+        let mut in_stream = InOctetStream::new(out_stream.data);
+        let in_stream_ref = &mut in_stream;
+        let deserialized_ping_command = PingCommand::from_cursor(in_stream_ref).unwrap();
 
         println!("before {:?}", &ping_command);
         println!("after {:?}", &deserialized_ping_command);
@@ -225,7 +211,9 @@ mod tests {
             0x01, // Has Connection
         ];
 
-        let message = &ServerReceiveCommand::from_octets(&octets).unwrap();
+        let mut in_stream = InOctetStream::new(Vec::from(octets));
+
+        let message = &ServerReceiveCommand::from_cursor(&mut in_stream).unwrap();
 
         match message {
             PingCommandType(ping_command) => {
@@ -233,13 +221,9 @@ mod tests {
                 assert_eq!(ping_command.term, 0x20);
                 assert_eq!(ping_command.knowledge, EXPECTED_KNOWLEDGE_VALUE);
                 assert_eq!(ping_command.has_connection_to_leader, true);
-                let octets_after = message.to_octets().unwrap();
-                assert_eq!(octets, octets_after.as_slice());
-            }
-            // _ => assert!(false, "should be ping command"),
+            } // _ => assert!(false, "should be ping command"),
         }
     }
-
 
     #[test]
     fn check_client_receive_message() {
@@ -247,24 +231,22 @@ mod tests {
 
         let octets = [
             ROOM_INFO_COMMAND_TYPE_ID,
-            0x00, // Term
-            0x4A, // Term (lower)
-            0x00, // Number of client infos that follows
+            0x00,                  // Term
+            0x4A,                  // Term (lower)
+            0x00,                  // Number of client infos that follows
             EXPECTED_LEADER_INDEX, // Leader index
         ];
 
+        let mut in_stream = InOctetStream::new(Vec::from(octets));
 
-        let message = &ClientReceiveCommand::from_octets(&octets).unwrap();
+        let message = &ClientReceiveCommand::from_octets(&mut in_stream).unwrap();
 
         match message {
             RoomInfoType(room_info) => {
                 println!("received {:?}", &room_info);
                 assert_eq!(room_info.term, 0x4A);
                 assert_eq!(room_info.leader_index, EXPECTED_LEADER_INDEX);
-                let octets_after = message.to_octets().unwrap();
-                assert_eq!(octets, octets_after.as_slice());
-            }
-            // _ => assert!(false, "should be room info command"),
+            } // _ => assert!(false, "should be room info command"),
         }
     }
 }
